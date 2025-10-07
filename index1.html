@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Színözön — Hangvezérelt (Működő verzió)</title>
+<style>
+  :root{
+    --bg:#070707; --card:#0d0d0d; --accent:#ff7a00; --muted:#bdbdbd;
+    --slot-size:64px; --peg-size:14px;
+  }
+  *{box-sizing:border-box;font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif}
+  body{background:linear-gradient(180deg,var(--bg),#050505);color:#eee;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:18px}
+  .app{width:980px;max-width:100%;background:linear-gradient(180deg,var(--card),#2c2c2c);border-radius:12px;padding:18px;box-shadow:0 14px 40px rgba(0,0,0,.6)}
+  header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+  h1{margin:0;font-size:20px;color:var(--accent)}
+  .lead{margin:0;color:var(--muted);font-size:13px}
+  .controls{display:flex;gap:10px;align-items:center}
+  button{background:#111;border:1px solid rgba(255,255,255,.04);color:#eee;padding:8px 12px;border-radius:8px;cursor:pointer}
+  button.primary{background:linear-gradient(90deg,var(--accent),#ff9100);color:#111;font-weight:600}
+  .layout{display:grid;grid-template-columns:1fr 340px;gap:18px}
+  .left{padding:8px}
+  .right{padding:12px;background:rgba(255,255,255,0.02);border-radius:8px}
+  .palette{display:flex;gap:8px;flex-wrap:wrap}
+  .palette .color-btn{width:52px;height:52px;border-radius:8px;border:2px solid rgba(255,255,255,.06);display:flex;align-items:center;justify-content:center;cursor:pointer}
+  .palette .color-label{font-size:11px;color:rgba(255,255,255,.85);margin-top:6px;text-align:center}
+  .slots{display:flex;gap:10px;margin:14px 0}
+  .slot{width:var(--slot-size);height:var(--slot-size);border-radius:10px;border:2px dashed rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center}
+  .board-row{display:flex;gap:12px;align-items:center}
+  .history{margin-top:12px;max-height:420px;overflow:auto}
+  .row{display:flex;align-items:center;gap:12px;padding:8px;border-bottom:1px solid rgba(255,255,255,.02)}
+  .small-peg{width:var(--peg-size);height:var(--peg-size);border-radius:50%;background:#222;border:1px solid rgba(255,255,255,.03)}
+  .peg-black{background:#000;border:1px solid #111}
+  .peg-white{background:#fff}
+  .status{color:var(--muted);font-size:13px;margin-top:8px}
+  footer{margin-top:12px;color:var(--muted);font-size:13px;text-align:center}
+  @media(max-width:900px){.layout{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+  <div class="app" role="application">
+    <header>
+      <div>
+        <h1>Színözön — Hangvezérelt</h1>
+        <div class="lead">Mondj színeket magyarul: &nbsp;<strong>piros, zöld, kék, stb.</strong> — &nbsp;"mégse" = visszalép, "rendben" = beküldés.</div>
+      </div>
+      <div class="controls">
+        <button id="listenBtn">🎤 Hallgass</button>
+        <button id="newBtn" class="primary">Új játék</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <main class="left">
+        <section aria-label="Játékmező">
+          <div class="board-row">
+            <div class="slots" id="currentSlots" aria-live="polite" aria-atomic="true"></div>
+            <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-start;margin-left:8px">
+              <button id="guessBtn">Tipp elküldése</button>
+              <button id="clearBtn">Töröl</button>
+            </div>
+          </div>
+
+          <div class="history" id="history"></div>
+          <div class="status" id="status">Állapot: várakozás</div>
+        </section>
+      </main>
+
+      <aside class="right">
+        <h3 style="margin:0 0 8px 0;color:var(--accent)">Paletta</h3>
+        <div class="palette" id="palette"></div>
+        <div style="height:12px"></div>
+        <div style="color:var(--muted);font-size:13px">Használat: kattints a palettára vagy mondd ki a színt. "mégse" = vissza, "rendben" = elküldés.</div>
+      </aside>
+    </div>
+  </div>
+
+<script>
+const COLORS = [
+  {name:'piros', hex:'#ff3b30'},
+  {name:'narancs', hex:'#ff9500'},
+  {name:'sárga', hex:'#ffd60a'},
+  {name:'zöld', hex:'#34c759'},
+  {name:'kék', hex:'#007aff'},
+  {name:'lila', hex:'#af52de'},
+  {name:'barna', hex:'#8b5a2b'},
+  {name:'fehér', hex:'#ffffff'},
+  {name:'fekete', hex:'#000000'}
+];
+const SECRET_LENGTH = 4;
+
+const paletteEl = document.getElementById('palette');
+const slotsEl = document.getElementById('currentSlots');
+const historyEl = document.getElementById('history');
+const statusEl = document.getElementById('status');
+const listenBtn = document.getElementById('listenBtn');
+
+let secret = [];
+let current = [];
+let recognition = null;
+let listening = false;
+
+function init(){
+  buildPalette();
+  newGame();
+  setupSpeech();
+}
+
+function buildPalette(){
+  paletteEl.innerHTML = '';
+  COLORS.forEach(c=>{
+    const wrap = document.createElement('div'); wrap.style.display='flex'; wrap.style.flexDirection='column'; wrap.style.alignItems='center';
+    const btn = document.createElement('button');
+    btn.className = 'color-btn';
+    btn.title = c.name;
+    btn.setAttribute('aria-label', c.name);
+    btn.style.background = c.hex;
+    btn.style.width = '52px'; btn.style.height='52px'; btn.style.borderRadius='8px'; btn.style.border = '2px solid rgba(255,255,255,.06)';
+    if(c.name === 'fehér' || c.name === 'sárga') btn.style.boxShadow = 'inset 0 0 0 1px rgba(0,0,0,0.5)';
+    btn.addEventListener('click', ()=>{
+      addColor(c.name);
+    });
+    const label = document.createElement('div'); label.className='color-label'; label.textContent = c.name;
+    wrap.appendChild(btn); wrap.appendChild(label);
+    paletteEl.appendChild(wrap);
+  });
+}
+
+function newGame(){
+  secret = [];
+  for(let i=0;i<SECRET_LENGTH;i++) secret.push(COLORS[Math.floor(Math.random()*COLORS.length)].name);
+  current = [];
+  historyEl.innerHTML = '';
+  setStatus('Új játék indult. Mondj vagy válassz 4 színt.');
+  console.log('Secret (debug):', secret);
+  speak('Új játék. Mondj ki négy színt vagy válassz a palettáról.');
+  renderCurrent();
+}
+
+function setStatus(txt){ statusEl.textContent = 'Állapot: ' + txt; }
+
+function renderCurrent(){
+  slotsEl.innerHTML = '';
+  for(let i=0;i<SECRET_LENGTH;i++){
+    const s = document.createElement('div'); s.className='slot'; s.style.width = '64px'; s.style.height='64px'; s.style.borderRadius='10px';
+    s.style.display='flex'; s.style.alignItems='center'; s.style.justifyContent='center';
+    s.style.border = '2px dashed rgba(255,255,255,.06)';
+    if(current[i]){
+      const col = COLORS.find(x=>x.name===current[i]);
+      s.style.background = col ? col.hex : '#222';
+      if(col && (col.name === 'fehér' || col.hex === '#ffd60a')){
+        s.style.boxShadow = 'inset 0 0 0 2px rgba(0,0,0,0.35)';
+      } else {
+        s.style.boxShadow = '';
+      }
+    } else {
+      s.style.background = 'transparent';
+    }
+    slotsEl.appendChild(s);
+  }
+}
+
+function pushHistory(guess, black, white){
+  const row = document.createElement('div'); row.className='row';
+  const guessEl = document.createElement('div'); guessEl.style.display='flex'; guessEl.style.gap='6px';
+  
+  guess.forEach(g=>{
+    const dot = document.createElement('div'); dot.className='small-peg'; dot.title = g;
+    dot.style.width='18px'; dot.style.height='18px'; dot.style.borderRadius='4px';
+    const col = COLORS.find(c=>c.name===g);
+    dot.style.background = col ? col.hex : '#333';
+    if(g === 'fehér' || col && col.hex === '#ffd60a') dot.style.boxShadow = 'inset 0 0 0 1px rgba(0,0,0,0.6)';
+    guessEl.appendChild(dot);
+  });
+   const resultEl = document.createElement('div'); resultEl.className='pegs'; resultEl.style.display='flex'; resultEl.style.gap='4px';
+  for(let i=0;i<black;i++){
+    const p=document.createElement('div'); p.className='small-peg peg-black'; resultEl.appendChild(p);
+  }
+  for(let i=0;i<white;i++){
+    const p=document.createElement('div'); p.className='small-peg peg-white'; resultEl.appendChild(p);
+  }
+  const emptyCount = SECRET_LENGTH - black - white;
+  for(let i=0;i<emptyCount;i++){
+    const p=document.createElement('div'); p.className='small-peg'; p.style.background='#222'; resultEl.appendChild(p);
+  }
+  row.appendChild(guessEl); row.appendChild(resultEl);
+  historyEl.prepend(row);
+}
+
+function evaluateGuess(guess){
+  let black = 0; let white = 0;
+  const secretCopy = secret.slice();
+  const guessCopy = guess.slice();
+  for(let i=0;i<SECRET_LENGTH;i++){
+    if(guessCopy[i] === secretCopy[i]){ black++; secretCopy[i] = guessCopy[i] = null; }
+  }
+  for(let i=0;i<SECRET_LENGTH;i++){
+    if(guessCopy[i]){
+      const idx = secretCopy.indexOf(guessCopy[i]);
+      if(idx !== -1){ white++; secretCopy[idx] = null; }
+    }
+  }
+  return {black, white};
+}
+
+document.getElementById('guessBtn').addEventListener('click', ()=>{
+  if(current.length !== SECRET_LENGTH){ setStatus('Adj meg 4 színt!'); speak('Kérlek, adj meg négy színt.'); return; }
+  const guess = current.slice();
+  const res = evaluateGuess(guess);
+  pushHistory(guess,res.black,res.white);
+  setStatus(`Tipp elküldve — fekete: ${res.black}, fehér: ${res.white}`);
+  if(res.black === SECRET_LENGTH){ setStatus('Nyertél!'); speak('Gratulálok! Nyertél.'); }
+  current = [];
+  renderCurrent();
+});
+
+document.getElementById('clearBtn').addEventListener('click', ()=>{ current=[]; renderCurrent(); setStatus('Kitörölve'); speak('Kitörölve.'); });
+document.getElementById('newBtn').addEventListener('click', newGame);
+
+function addColor(name){
+  if(current.length >= SECRET_LENGTH) return;
+  current.push(name);
+  renderCurrent();
+  setStatus('Hozzáadva: ' + name);
+  speak(name + ' hozzáadva.');
+  highlightPaletteButton(name);
+}
+
+function undoColor(){
+  if(current.length === 0) return;
+  const removed = current.pop();
+  renderCurrent();
+  setStatus('Törölve: ' + removed);
+  speak(removed + ' visszavonva.');
+}
+
+function highlightPaletteButton(name){
+  const all = paletteEl.querySelectorAll('.color-btn');
+  all.forEach(b=>{ if(b.title === name){ b.style.transform='scale(1.06)'; setTimeout(()=>b.style.transform='',220); } });
+}
+
+function speak(text){
+  if(!('speechSynthesis' in window)) return;
+  try{ window.speechSynthesis.cancel(); }catch(e){}
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'hu-HU'; u.volume=1; u.rate=1; u.pitch=1;
+  window.speechSynthesis.speak(u);
+}
+
+function setupSpeech(){
+  if(!(window.SpeechRecognition || window.webkitSpeechRecognition)){
+    listenBtn.disabled = true; listenBtn.textContent = 'Nincs beszédfelismerés';
+    return;
+  }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SR();
+  recognition.lang = 'hu-HU';
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
+  recognition.continuous = true; 
+
+  recognition.onresult = (e)=>{
+    const txt = e.results[e.results.length-1][0].transcript.toLowerCase().trim();
+    console.log('Felismert:', txt);
+    processSpeech(txt);
+  };
+
+  recognition.onend = ()=>{
+    if(listening){ 
+      try{ recognition.start(); setStatus('Hallgatás folytatódik...'); } 
+      catch(err){ console.error(err); setStatus('Nem sikerült újraindítani a mikrofont.'); listening=false; listenBtn.textContent='🎤 Hallgass'; }
+    } else {
+      listenBtn.textContent = '🎤 Hallgass';
+      setStatus('Leállítva');
+    }
+  };
+
+  recognition.onerror = (ev)=>{
+    console.warn('SR error', ev.error);
+    setStatus('Hiba a beszédfelismerésen: ' + ev.error);
+    listening = false; listenBtn.textContent = '🎤 Hallgass';
+  };
+
+  listenBtn.addEventListener('click', ()=>{
+    if(!listening){
+      try{
+        recognition.start(); 
+        listening = true; 
+        listenBtn.textContent = '...hallgatás...'; 
+        setStatus('Hallgatás...'); 
+      }catch(err){ console.error(err); setStatus('Nem sikerült elindítani a mikrofont.'); }
+    } else {
+      recognition.stop(); 
+      listening = false; 
+      listenBtn.textContent = '🎤 Hallgass'; 
+      setStatus('Leállítva');
+    }
+  });
+}
+
+function processSpeech(txt){
+  const cleaned = txt.replace(/[.,!?]/g,'').replace(/ +/g,' ').trim();
+  const parts = cleaned.split(/\s+/);
+  const map = {
+    'piros':'piros','red':'piros',
+    'narancs':'narancs','orange':'narancs',
+    'sarga':'sárga','sárga':'sárga','sarga':'sárga',
+    'zold':'zöld','zöld':'zöld',
+    'kek':'kék','kék':'kék','blue':'kék',
+    'lila':'lila','barna':'barna','feher':'fehér','fehér':'fehér','fekete':'fekete','black':'fekete'
+  };
+
+  if(cleaned.includes('mégse') || cleaned.includes('megse') || cleaned === 'vissza'){
+    undoColor();
+    return;
+  }
+  if(cleaned.includes('rendben') || cleaned.includes('küld') || cleaned.includes('beküld')){
+    
+    if(current.length === SECRET_LENGTH){
+      const guess = current.slice(); const res = evaluateGuess(guess); pushHistory(guess,res.black,res.white);
+      setStatus(`Tipp elküldve — fekete: ${res.black}, fehér: ${res.white}`);
+      if(res.black === SECRET_LENGTH){ setStatus('Nyertél!'); speak('Gratulálok! Nyertél.'); }
+      current = []; renderCurrent();
+    } else { speak('Még nem adtál meg négy színt.'); }
+    return;
+  }
+
+  let added = false;
+  for(const p of parts){
+    const key = p.normalize('NFD').replace(/\p{Diacritic}/gu,'');
+    if(map[key]){
+      addColor(map[key]); added = true;
+      if(current.length >= SECRET_LENGTH) break;
+    }
+  }
+  if(!added){ speak('Ezt a parancsot vagy színt nem ismerem.'); }
+}
+
+init();
+</script>
+</body>
+</html>
